@@ -1,0 +1,58 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage[numbers,square,sort&compress]{natbib}
+
+\title{EM Scoping Report}
+\author{Yinnan Song}
+\date{August 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Description of Topic}
+
+\ 
+
+The object of this research is to topologically analyse the structure of different hydrology models. For models that have completely different foundational structures, the topological structure of the results is expected to be different. When applied to different water bodies, the topological structures of outcome of the same model are expected to be different as well. Although the topological structures of outcomes for those models that are different in variables but share the same logic structure are expected to be similar, despite they might appear to be different under traditional way of evaluation like NSE.
+
+Fundamentally speaking, the research serves to exam whether a specific algebraic topology tool, namely time-delay embedding, has the capability to read more structural difference than a traditional numerical way of evaluation. The research serves for a rare attempt to apply topology tool in the area. 
+
+More importantly, we can use time-delay embedding and topological tools to analysis whether a change in variable of a model is just for a better fit numerically, or does it change the structural nature of the outcome.
+
+The manifold of the data cloud worth some attention as well. If we have time, one can take that into analysis, which will also combine differential geometry technic into the paper.
+
+\section{Data \& Methods To Be Used}
+\subsection{Data}
+
+\ 
+
+The data of the research will mainly comes from existed data in this course, such as Magela Creek, UK25006 and UK42008. We can also include further data from https://www.bom.gov.au/water/hrs/.
+\subsection{Method}
+
+\ 
+
+The method of the research will mainly comes from \citep{ref1, ref2, ref3}, including time-delay embedding and analysis of homology group. \citep{ref3} discuss how to choose a proper length of time-delay. A few differential geometry trick from \citep{ref4} can be used if we have time.
+
+Tool pack for topological analysis can be adopted so that we do not have to write our own algorithm. C++ library GUDHI (https://gudhi.github.io/) is built for this purpose and it also comes with a handy Python interface (https://gudhi.inria.fr/python/latest/).
+
+There are existed researches using delay embedding and homology to analysis water body \citep{ref5,ref6,ref7}, but they do not focus on model evaluation. Still, they will be great reference for our research.
+\section{Tasks To Be Done}
+
+\ 
+
+Our understanding of the method at this stage mainly comes from \citep{ref1, ref2}. The situation of any water body at any time is closely related to the situation previously, which is a perfect dynamical system to apply time-delay embedding. The streamflow can be re-written into a vector including the current streamflow and previous ones. For example, for each data, we can include two of the previous data with it and form a triple vector like $(Q_{t-2},Q_{t-1},Q_t)$. Now each of the data point also include the previous trend.
+
+Once we have this data cloud, one can set a hurdle $\epsilon$ and add edges to connect data points within distance $\epsilon$. Which will connect our data cloud into a graph. A popular choice of such a distance would be Euclidean distance. As one can imagine, if we are living in a world that makes sense, the data cloud should be samples of a smooth manifold. It might be possible to adopt the distance of this actual manifold instead of the Euclidean distance, which does not bend properly. According to \citep{ref4}, there are a few ways to simulate the actual distance in the manifold and connect the data cloud by it, which may provide us better geometric property.
+
+Then we need to fill in the faces ($2$-cells), $3$-cells or higher dimensional cells when the part of the graph ($1$-skeleton) it should attached to existed. For example, if three of the data nodes have been connected, then a triangular face should be attached to it. The dimension of cells we need to add depend on the dimension of the time-delay embedding vector. One should continue to increase the hurdle $\epsilon$ if the graph is not well connected or if they prefer more macro and general regularity.
+
+The regularity mentioned here means homology group, that different dimension loops stands for different kind of information. As we increase our hurdle, some feature will fate away, showing which loops are noises and which will continue to exist. Typically, a $H_0$ group will detect $0$-dimension loop, which can identify how much paradigm we have in the data set and outliers. While a $H_1$ group will detect the periodic feature of the data.
+
+As an example, for a simple function $f=\sin x$, if we choose a proper simple step length, and do the time-delay embedding such that each data point will now include the result of one previous step. With a proper $\epsilon$ and a sufficiently large sample size, the simplex after filled in faces (as the dimension of data point vectors is $2$) should be donut-like with a hole in the centre. Of course, the hydrology model of any water body is far more complex than a this, hence one would expect the outcome to be a rather complex combination of different amounts of different dimension holes.
+
+For further information, one could use Google Scholar and ANU library resources. One could gather more models for water bodies included in the data set by searching for related paper of those water bodiees.
+
+\bibliographystyle{unsrtnat}
+\bibliography{ref}
+\end{document}

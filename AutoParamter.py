@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Choose a delay automatically, then build and draw the Vietoris-Rips complex.
+"""Choose a delay and a connection threshold, then draw the Vietoris-Rips complex.
 
-This script runs on its own. EMBEDDING_DELAY is selected from the series.
-The other experiment controls are set at the top of this file.
+This script runs on its own. EMBEDDING_DELAY and the Rips threshold are
+selected from the series. The other experiment controls are set below.
 """
 
 import csv
@@ -56,8 +56,21 @@ MAX_CANDIDATE_DELAY = None
 # another branch in pairwise_distance_matrix, then selected by this name.
 DISTANCE = "euclidean"
 
-# Longest edge allowed in the Vietoris-Rips complex.
-MAX_EDGE_LENGTH = 0.13
+# Rule for the Rips threshold used in the figure and the reported complex.
+# "connected_loop" is the smallest radius at which the complex is connected
+# and still has a one-dimensional loop: beta_0 = 1 and beta_1 != 0.
+# Add a branch in select_threshold before choosing another name.
+THRESHOLD_METHOD = "connected_loop"
+
+# Upper bound of the one Vietoris-Rips filtration used to read persistence.
+# This is not the selected threshold. Increase it when no feasible threshold
+# is found inside the computed filtration.
+FILTRATION_MAX_EDGE_LENGTH = 0.13
+
+# A selected loop must still be alive for at least this much additional radius.
+# 0 keeps every loop that is present at the threshold. A positive value rejects
+# a loop that dies too soon after the threshold.
+MIN_LOOP_LIFETIME = 0.0
 
 # Highest simplex dimension to materialise.
 # 0 = vertices, 1 = edges, 2 = triangles.
@@ -108,8 +121,12 @@ def validate_controls():
         raise ValueError("MAX_CANDIDATE_DELAY must be a positive integer or None.")
     if not isinstance(DISTANCE, str) or not DISTANCE:
         raise ValueError("DISTANCE must be a non-empty distance name.")
-    if not np.isfinite(MAX_EDGE_LENGTH) or MAX_EDGE_LENGTH < 0:
-        raise ValueError("MAX_EDGE_LENGTH must be a finite number greater than or equal to 0.")
+    if not isinstance(THRESHOLD_METHOD, str) or not THRESHOLD_METHOD:
+        raise ValueError("THRESHOLD_METHOD must be a non-empty method name.")
+    if not np.isfinite(FILTRATION_MAX_EDGE_LENGTH) or FILTRATION_MAX_EDGE_LENGTH < 0:
+        raise ValueError("FILTRATION_MAX_EDGE_LENGTH must be a finite number greater than or equal to 0.")
+    if not np.isfinite(MIN_LOOP_LIFETIME) or MIN_LOOP_LIFETIME < 0:
+        raise ValueError("MIN_LOOP_LIFETIME must be a finite number greater than or equal to 0.")
     if type(MAX_SIMPLEX_DIMENSION) is not int or MAX_SIMPLEX_DIMENSION < 0:
         raise ValueError("MAX_SIMPLEX_DIMENSION must be a non-negative integer.")
     if type(MAX_HOMOLOGY_DIMENSION) is not int or MAX_HOMOLOGY_DIMENSION < 0:
@@ -312,6 +329,113 @@ def print_delay_selection(selection):
         )
 
 
+def interval_array(intervals):
+    """Return persistence intervals as an array of shape (n, 2)."""
+    values = np.asarray(intervals, dtype=float)
+    if values.size == 0:
+        return np.empty((0, 2))
+    return values.reshape(-1, 2)
+
+
+def select_connected_loop(h0_intervals, h1_intervals, filtration_max, min_lifetime):
+    """Return the smallest radius with beta_0 = 1 and a sufficiently long H_1 class.
+
+    One Vietoris-Rips filtration produces every finite H_0 death and every H_1
+    interval. The complex first becomes connected at the latest finite H_0 death.
+    A loop that is alive there, or born later while the complex stays connected,
+    supplies a feasible radius. The result is the earliest of those radii.
+    """
+    h0_intervals = interval_array(h0_intervals)
+    h1_intervals = interval_array(h1_intervals)
+    infinite_h0 = np.isinf(h0_intervals[:, 1]) if len(h0_intervals) else np.empty(0, dtype=bool)
+    component_count = int(np.count_nonzero(infinite_h0))
+    if component_count != 1:
+        return {
+            "feasible": False,
+            "reason": "not_connected",
+            "components_at_cap": component_count,
+        }
+
+    finite_deaths = h0_intervals[~infinite_h0, 1]
+    connectivity_radius = float(np.max(finite_deaths)) if len(finite_deaths) else 0.0
+    if len(h1_intervals) == 0:
+        return {
+            "feasible": False,
+            "reason": "no_loop",
+            "connectivity_radius": connectivity_radius,
+        }
+
+    earliest = np.maximum(h1_intervals[:, 0], connectivity_radius)
+    if min_lifetime > 0:
+        valid = earliest <= h1_intervals[:, 1] - min_lifetime
+    else:
+        # Intervals are half-open, so a class born at b is alive on [b, d).
+        valid = earliest < h1_intervals[:, 1]
+    valid &= earliest <= filtration_max
+    if not np.any(valid):
+        return {
+            "feasible": False,
+            "reason": "no_surviving_loop",
+            "connectivity_radius": connectivity_radius,
+        }
+
+    radius = float(np.min(earliest[valid]))
+    alive = (h1_intervals[:, 0] <= radius) & (radius < h1_intervals[:, 1])
+    return {
+        "feasible": True,
+        "connectivity_radius": connectivity_radius,
+        "threshold": radius,
+        "beta_1": int(np.count_nonzero(alive)),
+    }
+
+
+def select_threshold(h0_intervals, h1_intervals):
+    """Dispatch to the threshold rule named by THRESHOLD_METHOD."""
+    if THRESHOLD_METHOD == "connected_loop":
+        return select_connected_loop(
+            h0_intervals,
+            h1_intervals,
+            FILTRATION_MAX_EDGE_LENGTH,
+            MIN_LOOP_LIFETIME,
+        )
+    raise ValueError(
+        f"Unknown threshold method {THRESHOLD_METHOD!r}. "
+        "Implemented methods: 'connected_loop'."
+    )
+
+
+def print_threshold_selection(selection):
+    """Print the connectivity radius and the selected connection threshold."""
+    print("Threshold selection")
+    print(f"Method: {THRESHOLD_METHOD}")
+    print(f"Filtration upper bound: {FILTRATION_MAX_EDGE_LENGTH:g}")
+    print(f"Minimum loop lifetime: {MIN_LOOP_LIFETIME:g}")
+    if not selection["feasible"]:
+        reason = selection["reason"]
+        if reason == "not_connected":
+            print(
+                "The filtration never becomes connected. "
+                f"beta_0 at the upper bound is {selection['components_at_cap']}."
+            )
+        elif reason == "no_loop":
+            print(
+                "The filtration becomes connected at "
+                f"{selection['connectivity_radius']:.8g}, but it contains no H_1 interval."
+            )
+        else:
+            print(
+                "No H_1 class is still alive for the requested lifetime once the "
+                "complex is connected. Connectivity radius: "
+                f"{selection['connectivity_radius']:.8g}."
+            )
+        print("Increase FILTRATION_MAX_EDGE_LENGTH or reduce MIN_LOOP_LIFETIME.")
+        return
+    print(f"Connectivity radius: {selection['connectivity_radius']:.8g}")
+    print(f"Selected threshold: {selection['threshold']:.8g}")
+    print(f"beta_0 at the selected threshold: 1")
+    print(f"beta_1 at the selected threshold: {selection['beta_1']}")
+
+
 def print_embedding(dataset_path, series_name, embedded, columns):
     """Describe the delay embedding whose rows are the vertices."""
     print("Time-delay embedding")
@@ -355,7 +479,7 @@ def print_complex(simplex_tree, dataset_path, columns):
     print(f"Dataset: {dataset_path}")
     print(f"Columns: {', '.join(columns)}")
     print(f"Distance: {DISTANCE}")
-    print(f"Max edge length: {MAX_EDGE_LENGTH}")
+    print(f"Selected threshold: {SELECTED_EDGE_LENGTH:.8g}")
     print(f"Max simplex dimension: {MAX_SIMPLEX_DIMENSION}")
 
     grouped = {}
@@ -384,7 +508,7 @@ def print_homology(simplex_tree, max_homology_dimension, max_simplex_dimension):
     """Compute and print persistence intervals for H_0 through the requested degree.
 
     Intervals are half-open [birth, death). An infinite death means the class
-    is still alive at MAX_EDGE_LENGTH, so it contributes to the homology of
+    is still alive at SELECTED_EDGE_LENGTH, so it contributes to the homology of
     the printed complex.
     """
     # The top-dimensional homology is omitted unless requested explicitly,
@@ -668,7 +792,9 @@ def render_complex(simplex_tree, points, columns, figure_dimension, figure_path,
     if coords.shape[1] == 3:
         axes.set_zlabel(labels[2], labelpad=12)
         axes.tick_params(axis="y", pad=2)
-    axes.set_title(title or f"Vietoris-Rips complex, {DISTANCE}, threshold {MAX_EDGE_LENGTH:g}")
+    axes.set_title(
+        title or f"Vietoris-Rips complex, {DISTANCE}, threshold {SELECTED_EDGE_LENGTH:.8g}"
+    )
     axes.grid(True, alpha=0.3)
     add_legend(
         figure,
@@ -711,19 +837,41 @@ def save_complex_figure(simplex_tree, points, columns, dataset_path, title=None)
 
 
 def main():
-    global EMBEDDING_DELAY
+    global EMBEDDING_DELAY, SELECTED_EDGE_LENGTH
     validate_controls()
     series, series_name = load_series(DATASET_PATH, SERIES_COLUMN)
-    selection = select_embedding_delay(series, EMBEDDING_DIMENSION)
-    EMBEDDING_DELAY = selection["delay"]
-    print_delay_selection(selection)
+    delay_selection = select_embedding_delay(series, EMBEDDING_DIMENSION)
+    EMBEDDING_DELAY = delay_selection["delay"]
+    print_delay_selection(delay_selection)
     print()
     embedded = delay_embed(series, EMBEDDING_DIMENSION, EMBEDDING_DELAY)
     columns = embedded_column_names(series_name, EMBEDDING_DIMENSION, EMBEDDING_DELAY)
     distances = pairwise_distance_matrix(embedded, DISTANCE)
+    # One filtration up to the cap. Its persistence intervals determine the threshold.
+    filtration = build_rips_complex(
+        distances,
+        FILTRATION_MAX_EDGE_LENGTH,
+        MAX_SIMPLEX_DIMENSION,
+    )
+    filtration.persistence(
+        homology_coeff_field=HOMOLOGY_COEFFICIENT_FIELD,
+        min_persistence=0,
+        persistence_dim_max=MAX_HOMOLOGY_DIMENSION >= MAX_SIMPLEX_DIMENSION,
+    )
+    threshold_selection = select_threshold(
+        filtration.persistence_intervals_in_dimension(0),
+        filtration.persistence_intervals_in_dimension(1),
+    )
+    print_threshold_selection(threshold_selection)
+    print()
+    if not threshold_selection["feasible"]:
+        raise RuntimeError(
+            "No Rips threshold inside FILTRATION_MAX_EDGE_LENGTH satisfies the selected rule."
+        )
+    SELECTED_EDGE_LENGTH = threshold_selection["threshold"]
     simplex_tree = build_rips_complex(
         distances,
-        MAX_EDGE_LENGTH,
+        SELECTED_EDGE_LENGTH,
         MAX_SIMPLEX_DIMENSION,
     )
     print_embedding(DATASET_PATH, series_name, embedded, columns)
@@ -737,7 +885,7 @@ def main():
         DATASET_PATH,
         title=(
             f"Delay embedding, EMBEDDING_DELAY={EMBEDDING_DELAY}, "
-            f"{DISTANCE}, threshold {MAX_EDGE_LENGTH:g}"
+            f"{DISTANCE}, threshold {SELECTED_EDGE_LENGTH:.6g}"
         ),
     )
     print()

@@ -55,8 +55,16 @@ EMBEDDING_DELAY = 3
 # another branch in pairwise_distance_matrix, then selected by this name.
 DISTANCE = "euclidean"
 
-# Longest edge allowed in the Vietoris-Rips complex.
+# Upper bound of the Vietoris-Rips filtration. The drawn threshold is the
+# smallest radius at which beta_0 is within the sample-size bound below and
+# a one-dimensional loop is present.
 MAX_EDGE_LENGTH = 10
+
+# beta_0 <= COMPONENT_FRACTION * (time steps - empty steps - EMBEDDING_DELAY).
+COMPONENT_FRACTION = 0.1
+
+# A selected loop must still be alive for at least this much additional radius.
+MIN_LOOP_LIFETIME = 0.0
 
 # Highest simplex dimension to materialise.
 # 0 = vertices, 1 = edges, 2 = triangles.
@@ -390,7 +398,7 @@ def print_complex(simplex_tree, dataset_path, columns):
     print(f"Dataset: {dataset_path}")
     print(f"Columns: {', '.join(columns)}")
     print(f"Distance: {DISTANCE}")
-    print(f"Max edge length: {MAX_EDGE_LENGTH}")
+    print(f"Selected threshold: {SELECTED_EDGE_LENGTH:.8g}")
     print(f"Max simplex dimension: {MAX_SIMPLEX_DIMENSION}")
 
     grouped = {}
@@ -703,7 +711,9 @@ def render_complex(simplex_tree, points, columns, figure_dimension, figure_path,
     if coords.shape[1] == 3:
         axes.set_zlabel(labels[2], labelpad=12)
         axes.tick_params(axis="y", pad=2)
-    axes.set_title(title or f"Vietoris-Rips complex, {DISTANCE}, threshold {MAX_EDGE_LENGTH:g}")
+    axes.set_title(
+        title or f"Vietoris-Rips complex, {DISTANCE}, threshold {SELECTED_EDGE_LENGTH:.8g}"
+    )
     axes.grid(True, alpha=0.3)
     add_legend(
         figure,
@@ -745,16 +755,170 @@ def save_complex_figure(simplex_tree, points, columns, dataset_path, title=None)
     )
 
 
+def maximum_component_count(n_total, n_empty, delay):
+    """Return the largest beta_0 allowed by the sample-size bound.
+
+    The bound is COMPONENT_FRACTION * (time steps - empty steps - delay).
+    """
+    effective = n_total - n_empty - delay
+    if effective <= 0:
+        raise ValueError(
+            "The effective sample size must be positive. "
+            "It is the number of time steps, minus empty steps, minus EMBEDDING_DELAY."
+        )
+    return COMPONENT_FRACTION * effective
+
+
+def components_alive(h0_intervals, radius):
+    """Count H_0 classes whose death is strictly after radius."""
+    if len(h0_intervals) == 0:
+        return 0
+    return int(np.sum(h0_intervals[:, 1] > radius))
+
+
+def interval_array(intervals):
+    """Return persistence intervals as an array of shape (n, 2)."""
+    values = np.asarray(intervals, dtype=float)
+    if values.size == 0:
+        return np.empty((0, 2))
+    return values.reshape(-1, 2)
+
+
+def select_connected_loop(h0_intervals, h1_intervals, filtration_max, min_lifetime, maximum_components):
+    """Return the smallest radius whose beta_0 is within the sample-size bound."""
+    h0_intervals = interval_array(h0_intervals)
+    h1_intervals = interval_array(h1_intervals)
+    allowed = int(np.floor(maximum_components + 1e-9))
+    n_bars = len(h0_intervals)
+    infinite_h0 = np.isinf(h0_intervals[:, 1]) if n_bars else np.empty(0, dtype=bool)
+    components_at_cap = int(np.count_nonzero(infinite_h0)) if n_bars else 0
+    if allowed < 1 or components_at_cap > allowed:
+        return {
+            "feasible": False,
+            "reason": "not_connected",
+            "components_at_cap": components_at_cap,
+            "allowed_components": allowed,
+            "maximum_components": maximum_components,
+        }
+
+    finite_deaths = np.sort(h0_intervals[~infinite_h0, 1]) if n_bars else np.empty(0)
+    merges_needed = n_bars - allowed
+    if merges_needed <= 0:
+        connectivity_radius = 0.0
+    else:
+        connectivity_radius = float(finite_deaths[merges_needed - 1])
+    if len(h1_intervals) == 0:
+        return {
+            "feasible": False,
+            "reason": "no_loop",
+            "connectivity_radius": connectivity_radius,
+            "allowed_components": allowed,
+            "maximum_components": maximum_components,
+            "beta_0": components_alive(h0_intervals, connectivity_radius),
+        }
+
+    earliest = np.maximum(h1_intervals[:, 0], connectivity_radius)
+    if min_lifetime > 0:
+        valid = earliest <= h1_intervals[:, 1] - min_lifetime
+    else:
+        valid = earliest < h1_intervals[:, 1]
+    valid &= earliest <= filtration_max
+    if not np.any(valid):
+        return {
+            "feasible": False,
+            "reason": "no_surviving_loop",
+            "connectivity_radius": connectivity_radius,
+            "allowed_components": allowed,
+            "maximum_components": maximum_components,
+            "beta_0": components_alive(h0_intervals, connectivity_radius),
+        }
+
+    radius = float(np.min(earliest[valid]))
+    alive = (h1_intervals[:, 0] <= radius) & (radius < h1_intervals[:, 1])
+    return {
+        "feasible": True,
+        "connectivity_radius": connectivity_radius,
+        "threshold": radius,
+        "beta_0": components_alive(h0_intervals, radius),
+        "beta_1": int(np.count_nonzero(alive)),
+        "allowed_components": allowed,
+        "maximum_components": maximum_components,
+    }
+
+
+def print_threshold_selection(selection):
+    """Print the sample-size bound and the selected connection threshold."""
+    print("Threshold selection")
+    print(f"Filtration upper bound: {MAX_EDGE_LENGTH:g}")
+    print(f"Minimum loop lifetime: {MIN_LOOP_LIFETIME:g}")
+    print(f"Allowed beta_0: <= {selection['maximum_components']:.8g}")
+    if not selection["feasible"]:
+        reason = selection["reason"]
+        if reason == "not_connected":
+            print(
+                "beta_0 never falls to the allowed bound inside the filtration. "
+                f"beta_0 at the upper bound is {selection['components_at_cap']}."
+            )
+        elif reason == "no_loop":
+            print(
+                "beta_0 reaches the allowed bound at "
+                f"{selection['connectivity_radius']:.8g}, but the filtration contains no H_1 interval."
+            )
+        else:
+            print(
+                "No H_1 class is still alive for the requested lifetime once beta_0 "
+                "is within the allowed bound. That radius is "
+                f"{selection['connectivity_radius']:.8g}, "
+                f"where beta_0 is {selection['beta_0']}."
+            )
+        print("Increase MAX_EDGE_LENGTH or reduce MIN_LOOP_LIFETIME.")
+        return
+    print(f"Radius where beta_0 reaches the bound: {selection['connectivity_radius']:.8g}")
+    print(f"Selected threshold: {selection['threshold']:.8g}")
+    print(f"beta_0 at the selected threshold: {selection['beta_0']}")
+    print(f"beta_1 at the selected threshold: {selection['beta_1']}")
+
+
 def main():
+    global SELECTED_EDGE_LENGTH
     validate_controls()
     times, values, series_name, time_name = load_timed_series(DATASET_PATH, SERIES_COLUMN)
     _origin, time_step, grid = align_to_time_grid(times, values, series_name, time_name)
     embedded = delay_embed(grid, EMBEDDING_DIMENSION, EMBEDDING_DELAY)
     columns = embedded_column_names(series_name, EMBEDDING_DIMENSION, EMBEDDING_DELAY)
     distances = pairwise_distance_matrix(embedded, DISTANCE)
-    simplex_tree = build_rips_complex(
+    filtration = build_rips_complex(
         distances,
         MAX_EDGE_LENGTH,
+        MAX_SIMPLEX_DIMENSION,
+    )
+    filtration.persistence(
+        homology_coeff_field=HOMOLOGY_COEFFICIENT_FIELD,
+        min_persistence=0,
+        persistence_dim_max=MAX_HOMOLOGY_DIMENSION >= MAX_SIMPLEX_DIMENSION,
+    )
+    component_limit = maximum_component_count(
+        len(grid),
+        int(np.isnan(grid).sum()),
+        EMBEDDING_DELAY,
+    )
+    threshold_selection = select_connected_loop(
+        filtration.persistence_intervals_in_dimension(0),
+        filtration.persistence_intervals_in_dimension(1),
+        MAX_EDGE_LENGTH,
+        MIN_LOOP_LIFETIME,
+        component_limit,
+    )
+    print_threshold_selection(threshold_selection)
+    print()
+    if not threshold_selection["feasible"]:
+        raise RuntimeError(
+            "No Rips threshold inside MAX_EDGE_LENGTH satisfies the beta_0 bound and has a loop."
+        )
+    SELECTED_EDGE_LENGTH = threshold_selection["threshold"]
+    simplex_tree = build_rips_complex(
+        distances,
+        SELECTED_EDGE_LENGTH,
         MAX_SIMPLEX_DIMENSION,
     )
     print_embedding(DATASET_PATH, series_name, embedded, columns, time_step)
@@ -768,7 +932,7 @@ def main():
         DATASET_PATH,
         title=(
             f"Delay embedding, EMBEDDING_DELAY={EMBEDDING_DELAY}, "
-            f"{DISTANCE}, threshold {MAX_EDGE_LENGTH:g}"
+            f"{DISTANCE}, threshold {SELECTED_EDGE_LENGTH:.6g}"
         ),
     )
     print()

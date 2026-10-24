@@ -64,15 +64,19 @@ MAX_CANDIDATE_DELAY = None
 DISTANCE = "euclidean"
 
 # Rule for the Rips threshold used in the figure and the reported complex.
-# "connected_loop" is the smallest radius at which the complex is connected
-# and still has a one-dimensional loop: beta_0 = 1 and beta_1 != 0.
+# "connected_loop" is the smallest radius at which
+# beta_0 <= 0.1 * (time steps - empty steps - EMBEDDING_DELAY)
+# and the complex still has a one-dimensional loop.
 # Add a branch in select_threshold before choosing another name.
 THRESHOLD_METHOD = "connected_loop"
+
+# Fraction of the effective sample allowed to remain as separate components.
+COMPONENT_FRACTION = 0.1
 
 # Upper bound of the one Vietoris-Rips filtration used to read persistence.
 # This is not the selected threshold. Increase it when no feasible threshold
 # is found inside the computed filtration.
-FILTRATION_MAX_EDGE_LENGTH = 67
+FILTRATION_MAX_EDGE_LENGTH = 9
 
 # A selected loop must still be alive for at least this much additional radius.
 # 0 keeps every loop that is present at the threshold. A positive value rejects
@@ -494,32 +498,64 @@ def interval_array(intervals):
     return values.reshape(-1, 2)
 
 
-def select_connected_loop(h0_intervals, h1_intervals, filtration_max, min_lifetime):
-    """Return the smallest radius with beta_0 = 1 and a sufficiently long H_1 class.
+def maximum_component_count(n_total, n_empty, delay):
+    """Return the largest beta_0 allowed by the sample-size bound.
 
-    One Vietoris-Rips filtration produces every finite H_0 death and every H_1
-    interval. The complex first becomes connected at the latest finite H_0 death.
-    A loop that is alive there, or born later while the complex stays connected,
-    supplies a feasible radius. The result is the earliest of those radii.
+    The bound is COMPONENT_FRACTION * (time steps - empty steps - delay).
+    """
+    effective = n_total - n_empty - delay
+    if effective <= 0:
+        raise ValueError(
+            "The effective sample size must be positive. "
+            "It is the number of time steps, minus empty steps, minus EMBEDDING_DELAY."
+        )
+    return COMPONENT_FRACTION * effective
+
+
+def components_alive(h0_intervals, radius):
+    """Count H_0 classes whose death is strictly after radius."""
+    if len(h0_intervals) == 0:
+        return 0
+    return int(np.sum(h0_intervals[:, 1] > radius))
+
+
+def select_connected_loop(
+    h0_intervals, h1_intervals, filtration_max, min_lifetime, maximum_components
+):
+    """Return the smallest radius whose beta_0 is within the sample-size bound.
+
+    The bound replaces a requirement of one component. From that radius onward,
+    a loop that is already alive, or born later, supplies the selected threshold.
     """
     h0_intervals = interval_array(h0_intervals)
     h1_intervals = interval_array(h1_intervals)
-    infinite_h0 = np.isinf(h0_intervals[:, 1]) if len(h0_intervals) else np.empty(0, dtype=bool)
-    component_count = int(np.count_nonzero(infinite_h0))
-    if component_count != 1:
+    allowed = int(np.floor(maximum_components + 1e-9))
+    n_bars = len(h0_intervals)
+    infinite_h0 = np.isinf(h0_intervals[:, 1]) if n_bars else np.empty(0, dtype=bool)
+    components_at_cap = int(np.count_nonzero(infinite_h0)) if n_bars else 0
+    if allowed < 1 or components_at_cap > allowed:
         return {
             "feasible": False,
             "reason": "not_connected",
-            "components_at_cap": component_count,
+            "components_at_cap": components_at_cap,
+            "allowed_components": allowed,
+            "maximum_components": maximum_components,
         }
 
-    finite_deaths = h0_intervals[~infinite_h0, 1]
-    connectivity_radius = float(np.max(finite_deaths)) if len(finite_deaths) else 0.0
+    finite_deaths = np.sort(h0_intervals[~infinite_h0, 1]) if n_bars else np.empty(0)
+    merges_needed = n_bars - allowed
+    if merges_needed <= 0:
+        connectivity_radius = 0.0
+    else:
+        connectivity_radius = float(finite_deaths[merges_needed - 1])
     if len(h1_intervals) == 0:
         return {
             "feasible": False,
             "reason": "no_loop",
             "connectivity_radius": connectivity_radius,
+            "allowed_components": allowed,
+            "maximum_components": maximum_components,
+            "beta_0": components_alive(h0_intervals, connectivity_radius),
         }
 
     earliest = np.maximum(h1_intervals[:, 0], connectivity_radius)
@@ -534,6 +570,9 @@ def select_connected_loop(h0_intervals, h1_intervals, filtration_max, min_lifeti
             "feasible": False,
             "reason": "no_surviving_loop",
             "connectivity_radius": connectivity_radius,
+            "allowed_components": allowed,
+            "maximum_components": maximum_components,
+            "beta_0": components_alive(h0_intervals, connectivity_radius),
         }
 
     radius = float(np.min(earliest[valid]))
@@ -542,11 +581,14 @@ def select_connected_loop(h0_intervals, h1_intervals, filtration_max, min_lifeti
         "feasible": True,
         "connectivity_radius": connectivity_radius,
         "threshold": radius,
+        "beta_0": components_alive(h0_intervals, radius),
         "beta_1": int(np.count_nonzero(alive)),
+        "allowed_components": allowed,
+        "maximum_components": maximum_components,
     }
 
 
-def select_threshold(h0_intervals, h1_intervals):
+def select_threshold(h0_intervals, h1_intervals, maximum_components):
     """Dispatch to the threshold rule named by THRESHOLD_METHOD."""
     if THRESHOLD_METHOD == "connected_loop":
         return select_connected_loop(
@@ -554,6 +596,7 @@ def select_threshold(h0_intervals, h1_intervals):
             h1_intervals,
             FILTRATION_MAX_EDGE_LENGTH,
             MIN_LOOP_LIFETIME,
+            maximum_components,
         )
     raise ValueError(
         f"Unknown threshold method {THRESHOLD_METHOD!r}. "
@@ -567,29 +610,31 @@ def print_threshold_selection(selection):
     print(f"Method: {THRESHOLD_METHOD}")
     print(f"Filtration upper bound: {FILTRATION_MAX_EDGE_LENGTH:g}")
     print(f"Minimum loop lifetime: {MIN_LOOP_LIFETIME:g}")
+    print(f"Allowed beta_0: <= {selection['maximum_components']:.8g}")
     if not selection["feasible"]:
         reason = selection["reason"]
         if reason == "not_connected":
             print(
-                "The filtration never becomes connected. "
+                "beta_0 never falls to the allowed bound inside the filtration. "
                 f"beta_0 at the upper bound is {selection['components_at_cap']}."
             )
         elif reason == "no_loop":
             print(
-                "The filtration becomes connected at "
-                f"{selection['connectivity_radius']:.8g}, but it contains no H_1 interval."
+                "beta_0 reaches the allowed bound at "
+                f"{selection['connectivity_radius']:.8g}, but the filtration contains no H_1 interval."
             )
         else:
             print(
-                "No H_1 class is still alive for the requested lifetime once the "
-                "complex is connected. Connectivity radius: "
-                f"{selection['connectivity_radius']:.8g}."
+                "No H_1 class is still alive for the requested lifetime once beta_0 "
+                "is within the allowed bound. That radius is "
+                f"{selection['connectivity_radius']:.8g}, "
+                f"where beta_0 is {selection['beta_0']}."
             )
         print("Increase FILTRATION_MAX_EDGE_LENGTH or reduce MIN_LOOP_LIFETIME.")
         return
-    print(f"Connectivity radius: {selection['connectivity_radius']:.8g}")
+    print(f"Radius where beta_0 reaches the bound: {selection['connectivity_radius']:.8g}")
     print(f"Selected threshold: {selection['threshold']:.8g}")
-    print(f"beta_0 at the selected threshold: 1")
+    print(f"beta_0 at the selected threshold: {selection['beta_0']}")
     print(f"beta_1 at the selected threshold: {selection['beta_1']}")
 
 
@@ -1019,9 +1064,13 @@ def main():
         min_persistence=0,
         persistence_dim_max=MAX_HOMOLOGY_DIMENSION >= MAX_SIMPLEX_DIMENSION,
     )
+    n_total = len(grid)
+    n_empty = int(np.isnan(grid).sum())
+    component_limit = maximum_component_count(n_total, n_empty, EMBEDDING_DELAY)
     threshold_selection = select_threshold(
         filtration.persistence_intervals_in_dimension(0),
         filtration.persistence_intervals_in_dimension(1),
+        component_limit,
     )
     print_threshold_selection(threshold_selection)
     print()

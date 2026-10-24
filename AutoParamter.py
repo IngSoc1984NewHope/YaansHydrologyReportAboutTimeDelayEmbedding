@@ -32,6 +32,10 @@ DATASET_PATH = Path(__file__).with_name("Exp1Sin.csv")
 # Scalar series to embed. None selects the file when it has exactly one column.
 SERIES_COLUMN = "sin(t)"
 
+# Timestamp column. None uses the other column when the file has two columns.
+# A file with only the series is treated as evenly spaced with step 1.
+TIME_COLUMN = "t"
+
 # Binary delay embedding uses dimension 2: each point is
 # (x[t], x[t + delay], ..., x[t + (dimension - 1) * delay]).
 EMBEDDING_DIMENSION = 2
@@ -109,6 +113,8 @@ def validate_controls():
     """Reject control values that cannot define a Vietoris-Rips homology run."""
     if SERIES_COLUMN is not None and not isinstance(SERIES_COLUMN, str):
         raise ValueError("SERIES_COLUMN must be a column name or None.")
+    if TIME_COLUMN is not None and (not isinstance(TIME_COLUMN, str) or not TIME_COLUMN):
+        raise ValueError("TIME_COLUMN must be a column name or None.")
     if type(EMBEDDING_DIMENSION) is not int or EMBEDDING_DIMENSION < 1:
         raise ValueError("EMBEDDING_DIMENSION must be a positive integer.")
     if not isinstance(DELAY_METHOD, str) or not DELAY_METHOD:
@@ -149,8 +155,26 @@ def validate_controls():
         )
 
 
+# Blank cells and these tokens are missing observations, not numbers.
+MISSING_TOKENS = {"", "na", "nan", "null", "none", "n/a", "#n/a"}
+
+
+def parse_cell(cell, path, row_number, column_number):
+    """Parse one CSV cell. An empty or missing token becomes NaN."""
+    text = cell.strip()
+    if text.lower() in MISSING_TOKENS:
+        return np.nan
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise ValueError(
+            f"Non-numeric value {cell!r} in {path.name} at data row {row_number}, "
+            f"column {column_number}."
+        ) from exc
+
+
 def load_point_cloud(path):
-    """Load a CSV point cloud. Returns coordinates of shape (n_points, dimension) and column names."""
+    """Load a CSV table. Missing cells are NaN. Returns shape (n_rows, n_columns) and names."""
     if not path.is_file():
         raise FileNotFoundError(f"Dataset not found: {path}")
 
@@ -163,14 +187,18 @@ def load_point_cloud(path):
     if not rows:
         raise ValueError(f"Dataset is empty: {path}")
 
-    def parse_row(row):
-        return [float(cell) for cell in row]
+    def row_is_numeric(row):
+        try:
+            for column_number, cell in enumerate(row, start=1):
+                parse_cell(cell, path, 1, column_number)
+        except ValueError:
+            return False
+        return True
 
-    try:
-        parse_row(rows[0])
+    if row_is_numeric(rows[0]):
         columns = [f"x{index}" for index in range(len(rows[0]))]
         data_rows = rows
-    except ValueError:
+    else:
         columns = [cell.strip() or f"x{index}" for index, cell in enumerate(rows[0])]
         data_rows = rows[1:]
 
@@ -178,48 +206,158 @@ def load_point_cloud(path):
         raise ValueError(f"Dataset has a header but no data rows: {path}")
 
     points = []
-    for offset, row in enumerate(data_rows, start=1):
-        if len(row) != len(columns):
-            raise ValueError(f"Row {offset} of {path.name} does not have {len(columns)} columns.")
-        try:
-            points.append(parse_row(row))
-        except ValueError as exc:
-            raise ValueError(f"Non-numeric value in {path.name} at data row {offset}.") from exc
+    for row_number, row in enumerate(data_rows, start=1):
+        # A line such as "1.2," or "1.2" has an empty final field.
+        if len(row) < len(columns):
+            row = row + [""] * (len(columns) - len(row))
+        elif len(row) > len(columns):
+            raise ValueError(f"Row {row_number} of {path.name} has more than {len(columns)} columns.")
+        points.append(
+            [
+                parse_cell(cell, path, row_number, column_number)
+                for column_number, cell in enumerate(row, start=1)
+            ]
+        )
 
     cloud = np.asarray(points, dtype=float)
     if cloud.ndim != 2 or cloud.shape[0] == 0:
         raise ValueError(f"Dataset does not contain a point cloud: {path}")
-    if not np.isfinite(cloud).all():
-        raise ValueError(f"Dataset contains NaN or infinite coordinates: {path}")
     return cloud, columns
 
 
-def load_series(path, column_name):
-    """Return the chosen scalar column and its name. Row order is preserved."""
+def resolve_time_column(columns, series_name):
+    """Return the timestamp column, or None when the series itself supplies the clock."""
+    if TIME_COLUMN is not None:
+        if TIME_COLUMN not in columns:
+            names = ", ".join(columns)
+            raise ValueError(f"Column {TIME_COLUMN!r} is not in the dataset. Columns: {names}.")
+        if TIME_COLUMN == series_name:
+            raise ValueError("TIME_COLUMN and SERIES_COLUMN must name different columns.")
+        return TIME_COLUMN
+    others = [name for name in columns if name != series_name]
+    if len(others) == 1:
+        return others[0]
+    if len(columns) == 1:
+        return None
+    names = ", ".join(columns)
+    raise ValueError(f"Set TIME_COLUMN to one of: {names}.")
+
+
+def load_timed_series(path, column_name):
+    """Return timestamps, series values, and the series name.
+
+    Empty series values stay in place as NaN. Their timestamps still define the
+    sampling interval, so a later delay can count real time steps across a gap.
+    """
     cloud, columns = load_point_cloud(path)
     if column_name is None:
         if len(columns) != 1:
             names = ", ".join(columns)
             raise ValueError(f"Set SERIES_COLUMN to one of: {names}.")
-        return cloud[:, 0], columns[0]
-    if column_name not in columns:
-        names = ", ".join(columns)
-        raise ValueError(f"Column {column_name!r} is not in {path.name}. Columns: {names}.")
-    return cloud[:, columns.index(column_name)], column_name
+        series_name = columns[0]
+        values = cloud[:, 0]
+    else:
+        if column_name not in columns:
+            names = ", ".join(columns)
+            raise ValueError(f"Column {column_name!r} is not in {path.name}. Columns: {names}.")
+        series_name = column_name
+        values = cloud[:, columns.index(column_name)]
+    if np.isinf(values).any():
+        raise ValueError(f"Column {series_name!r} in {path.name} contains an infinite value.")
+
+    time_name = resolve_time_column(columns, series_name)
+    if time_name is None:
+        times = np.arange(len(values), dtype=float)
+    else:
+        times = cloud[:, columns.index(time_name)]
+        if np.isinf(times).any():
+            raise ValueError(f"Column {time_name!r} in {path.name} contains an infinite value.")
+    if not np.isfinite(values).any():
+        raise ValueError(f"Column {series_name!r} in {path.name} has no numeric values.")
+    return times, values, series_name, time_name
 
 
-def delay_embed(series, dimension, delay):
-    """Build delay vectors (x[t], x[t + delay], ..., x[t + (dimension - 1) * delay])."""
-    window = (dimension - 1) * delay
-    if len(series) <= window:
+def align_to_time_grid(times, values, series_name, time_name):
+    """Place observations on a regular time grid. Missing values remain NaN.
+
+    The step is the median positive gap between successive timestamps, including
+    timestamps whose series value is empty.
+    """
+    if time_name is None:
+        print(f"Time column: none. Time step: 1")
+        return 0.0, 1.0, np.asarray(values, dtype=float)
+
+    finite_time = np.isfinite(times)
+    if not finite_time.all():
+        print(f"Omitted {int((~finite_time).sum())} row(s) with an empty {time_name} value.")
+    times = np.asarray(times[finite_time], dtype=float)
+    values = np.asarray(values[finite_time], dtype=float)
+    if len(times) == 0:
+        raise ValueError(f"Column {time_name!r} has no numeric timestamps.")
+    order = np.argsort(times, kind="mergesort")
+    times = times[order]
+    values = values[order]
+    if len(times) == 1:
+        step = 1.0
+    else:
+        gaps = np.diff(times)
+        positive = gaps[gaps > 0]
+        if len(positive) == 0:
+            raise ValueError(f"Column {time_name!r} does not advance in time.")
+        step = float(np.median(positive))
+    origin = float(times[0])
+    slots = np.rint((times - origin) / step).astype(int)
+    deviation = np.abs(times - (origin + slots * step))
+    if np.any(deviation > 0.05 * step):
         raise ValueError(
-            "The series is shorter than one embedding window. "
+            f"Timestamps in {time_name!r} are not equally spaced, "
+            "so a delay cannot be counted in equal time steps."
+        )
+    grid = np.full(int(slots.max()) + 1, np.nan)
+    for slot, value in zip(slots, values):
+        current = grid[slot]
+        if np.isfinite(current) and np.isfinite(value) and not np.isclose(current, value):
+            raise ValueError(f"Column {time_name!r} repeats a timestamp with two different values.")
+        if np.isfinite(value):
+            grid[slot] = value
+    missing = int(np.isnan(grid).sum())
+    print(f"Time column: {time_name}")
+    print(f"Time step: {step:.8g}")
+    if missing:
+        print(
+            f"{missing} time step(s) have an empty {series_name} value. "
+            "Those timestamps remain in the grid and are not closed up."
+        )
+    return origin, step, grid
+
+
+def delay_embed(grid, dimension, delay):
+    """Build delay vectors separated by `delay` time steps.
+
+    A window is kept only when every timestamp it needs has a numeric value.
+    A gap is not replaced by the next available observation.
+    """
+    window = (dimension - 1) * delay
+    if len(grid) <= window:
+        raise ValueError(
+            "The time span is shorter than one embedding window. "
             "Reduce EMBEDDING_DIMENSION or EMBEDDING_DELAY."
         )
-    length = len(series) - window
-    return np.column_stack(
-        [series[lag * delay : lag * delay + length] for lag in range(dimension)]
-    )
+    length = len(grid) - window
+    columns = [grid[lag * delay : lag * delay + length] for lag in range(dimension)]
+    embedded = np.column_stack(columns)
+    complete = np.isfinite(embedded).all(axis=1)
+    if not complete.any():
+        raise ValueError(
+            "No delay window has a value at every required timestamp. "
+            "Reduce EMBEDDING_DELAY or fill the missing observations."
+        )
+    skipped = int((~complete).sum())
+    if skipped:
+        print(
+            f"Skipped {skipped} delay window(s) that land on an empty timestamp."
+        )
+    return embedded[complete]
 
 
 def embedded_column_names(series_name, dimension, delay):
@@ -246,13 +384,17 @@ def average_displacement(series, dimension, delay):
     window = (dimension - 1) * delay
     length = len(series) - window
     if length < 1:
-        raise ValueError("The series is shorter than one embedding window at this delay.")
+        return np.nan
     base = series[:length]
     squared = np.zeros(length, dtype=float)
+    valid = np.isfinite(base)
     for lag_index in range(1, dimension):
         shifted = series[lag_index * delay : lag_index * delay + length]
-        squared += (shifted - base) ** 2
-    return float(np.mean(np.sqrt(squared)))
+        valid &= np.isfinite(shifted)
+        squared += np.where(valid, shifted - base, 0.0) ** 2
+    if not np.any(valid):
+        return np.nan
+    return float(np.mean(np.sqrt(squared[valid])))
 
 
 def select_average_displacement(series, dimension, slope_fraction, max_delay):
@@ -273,8 +415,20 @@ def select_average_displacement(series, dimension, slope_fraction, max_delay):
         )
 
     displacements = np.zeros(limit + 1, dtype=float)
+    usable = limit
     for delay in range(1, limit + 1):
-        displacements[delay] = average_displacement(series, dimension, delay)
+        value = average_displacement(series, dimension, delay)
+        if not np.isfinite(value):
+            usable = delay - 1
+            break
+        displacements[delay] = value
+    if usable < 2:
+        raise ValueError(
+            "Not enough complete delay windows to estimate a slope. "
+            "Empty timestamps remove every window at a short delay."
+        )
+    limit = usable
+    displacements = displacements[: limit + 1]
     slopes = np.diff(displacements)
     initial_slope = float(slopes[0])
     threshold = slope_fraction * initial_slope
@@ -436,16 +590,19 @@ def print_threshold_selection(selection):
     print(f"beta_1 at the selected threshold: {selection['beta_1']}")
 
 
-def print_embedding(dataset_path, series_name, embedded, columns):
+def print_embedding(dataset_path, series_name, embedded, columns, time_step):
     """Describe the delay embedding whose rows are the vertices."""
     print("Time-delay embedding")
     print(f"Dataset: {dataset_path}")
     print(f"Series: {series_name}")
     print(f"Embedding dimension: {EMBEDDING_DIMENSION}")
-    print(f"Delay: {EMBEDDING_DELAY} sample(s)")
+    print(
+        f"Delay: {EMBEDDING_DELAY} time step(s) "
+        f"= {EMBEDDING_DELAY * time_step:.8g} time units"
+    )
     print(f"Coordinates: {', '.join(columns)}")
     print(f"Embedded points: {len(embedded)}")
-    print("Vertex i is the window starting at series index i.")
+    print("Vertex i is a complete window on the original time grid.")
 
 
 def pairwise_distance_matrix(points, distance_name):
@@ -839,12 +996,13 @@ def save_complex_figure(simplex_tree, points, columns, dataset_path, title=None)
 def main():
     global EMBEDDING_DELAY, SELECTED_EDGE_LENGTH
     validate_controls()
-    series, series_name = load_series(DATASET_PATH, SERIES_COLUMN)
-    delay_selection = select_embedding_delay(series, EMBEDDING_DIMENSION)
+    times, values, series_name, time_name = load_timed_series(DATASET_PATH, SERIES_COLUMN)
+    _origin, time_step, grid = align_to_time_grid(times, values, series_name, time_name)
+    delay_selection = select_embedding_delay(grid, EMBEDDING_DIMENSION)
     EMBEDDING_DELAY = delay_selection["delay"]
     print_delay_selection(delay_selection)
     print()
-    embedded = delay_embed(series, EMBEDDING_DIMENSION, EMBEDDING_DELAY)
+    embedded = delay_embed(grid, EMBEDDING_DIMENSION, EMBEDDING_DELAY)
     columns = embedded_column_names(series_name, EMBEDDING_DIMENSION, EMBEDDING_DELAY)
     distances = pairwise_distance_matrix(embedded, DISTANCE)
     # One filtration up to the cap. Its persistence intervals determine the threshold.
@@ -874,7 +1032,7 @@ def main():
         SELECTED_EDGE_LENGTH,
         MAX_SIMPLEX_DIMENSION,
     )
-    print_embedding(DATASET_PATH, series_name, embedded, columns)
+    print_embedding(DATASET_PATH, series_name, embedded, columns, time_step)
     print()
     print_complex(simplex_tree, DATASET_PATH, columns)
     print()

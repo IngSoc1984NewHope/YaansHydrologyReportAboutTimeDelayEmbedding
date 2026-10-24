@@ -28,14 +28,17 @@ from scipy.spatial.distance import cdist
 # =============================================================================
 
 # Source table. Row order is the time order. A non-numeric first row is a header.
-DATASET_PATH = Path(__file__).with_name("Exp1Sin.csv")
+#DATASET_PATH = Path(__file__).with_name("Exp1Sin.csv")
+DATASET_PATH = Path(__file__).with_name("MaeChaem_Q_H.csv")
 
 # Scalar series to embed. None selects the file when it has exactly one column.
-SERIES_COLUMN = "sin(t)"
+#SERIES_COLUMN = "sin(t)"
+SERIES_COLUMN = "Q"
 
 # Timestamp column. None uses the other column when the file has two columns.
 # A file with only the series is treated as evenly spaced with step 1.
-TIME_COLUMN = "t"
+#TIME_COLUMN = "t"
+TIME_COLUMN = "Date"
 
 # Binary delay embedding uses dimension 2: each point is
 # (x[t], x[t + delay], ..., x[t + (dimension - 1) * delay]).
@@ -44,7 +47,7 @@ EMBEDDING_DIMENSION = 2
 # Lag in nominal time steps. One step is the sampling interval of TIME_COLUMN.
 # A delay of k uses time lag k * dt, and only windows with a value at every
 # required timestamp are kept.
-EMBEDDING_DELAY = 2
+EMBEDDING_DELAY = 3
 
 # Pairwise distance that decides which edges are admitted.
 # "euclidean" is the ordinary Euclidean distance.
@@ -53,7 +56,7 @@ EMBEDDING_DELAY = 2
 DISTANCE = "euclidean"
 
 # Longest edge allowed in the Vietoris-Rips complex.
-MAX_EDGE_LENGTH = 0.15
+MAX_EDGE_LENGTH = 10
 
 # Highest simplex dimension to materialise.
 # 0 = vertices, 1 = edges, 2 = triangles.

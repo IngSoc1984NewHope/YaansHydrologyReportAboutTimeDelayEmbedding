@@ -27,14 +27,17 @@ from scipy.spatial.distance import cdist
 # =============================================================================
 
 # Source table. Row order is the time order. A non-numeric first row is a header.
-DATASET_PATH = Path(__file__).with_name("Exp1Sin.csv")
+#DATASET_PATH = Path(__file__).with_name("Exp1Sin.csv")
+DATASET_PATH = Path(__file__).with_name("MaeChaem_Q_H.csv")
 
 # Scalar series to embed. None selects the file when it has exactly one column.
-SERIES_COLUMN = "sin(t)"
+#SERIES_COLUMN = "sin(t)"
+SERIES_COLUMN = "Q"
 
 # Timestamp column. None uses the other column when the file has two columns.
 # A file with only the series is treated as evenly spaced with step 1.
-TIME_COLUMN = "t"
+#TIME_COLUMN = "t"
+TIME_COLUMN = "Date"
 
 # Binary delay embedding uses dimension 2: each point is
 # (x[t], x[t + delay], ..., x[t + (dimension - 1) * delay]).
@@ -69,7 +72,7 @@ THRESHOLD_METHOD = "connected_loop"
 # Upper bound of the one Vietoris-Rips filtration used to read persistence.
 # This is not the selected threshold. Increase it when no feasible threshold
 # is found inside the computed filtration.
-FILTRATION_MAX_EDGE_LENGTH = 0.13
+FILTRATION_MAX_EDGE_LENGTH = 67
 
 # A selected loop must still be alive for at least this much additional radius.
 # 0 keeps every loop that is present at the threshold. A positive value rejects

@@ -39,7 +39,7 @@ EMBEDDING_DIMENSION = 2
 
 # Lag between consecutive coordinates, measured in samples.
 # 1 pairs each sample with the immediately following sample.
-EMBEDDING_DELAY = 1
+EMBEDDING_DELAY = 2
 
 # Pairwise distance that decides which edges are admitted.
 # "euclidean" is the ordinary Euclidean distance.

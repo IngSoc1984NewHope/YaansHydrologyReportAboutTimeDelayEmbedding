@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Build a Vietoris-Rips complex of a point cloud and compute its homology.
+"""Delay-embed a scalar series, then build and draw its Vietoris-Rips complex.
 
-Each row of the chosen CSV is one point, and each column is a coordinate.
-The complex is the filtered Vietoris-Rips complex of all simplices whose
-longest edge is at most MAX_EDGE_LENGTH. The same simplex geometry is drawn
-in a 2D or 3D figure.
+A binary embedding represents each time by the current sample and one lagged
+sample. The lag, embedding dimension, distance, Rips threshold, and the
+simplex and homology dimensions are controls at the top of this file.
 """
 
 import csv
@@ -28,8 +27,19 @@ from scipy.spatial.distance import cdist
 # These are the values most likely to change between experiments.
 # =============================================================================
 
-# Point cloud. A non-numeric first row is read as a column header.
+# Source table. Row order is the time order. A non-numeric first row is a header.
 DATASET_PATH = Path(__file__).with_name("Exp1Sin.csv")
+
+# Scalar series to embed. None selects the file when it has exactly one column.
+SERIES_COLUMN = "sin(t)"
+
+# Binary delay embedding uses dimension 2: each point is
+# (x[t], x[t + delay], ..., x[t + (dimension - 1) * delay]).
+EMBEDDING_DIMENSION = 2
+
+# Lag between consecutive coordinates, measured in samples.
+# 1 pairs each sample with the immediately following sample.
+EMBEDDING_DELAY = 1
 
 # Pairwise distance that decides which edges are admitted.
 # "euclidean" is the ordinary Euclidean distance.
@@ -38,7 +48,7 @@ DATASET_PATH = Path(__file__).with_name("Exp1Sin.csv")
 DISTANCE = "euclidean"
 
 # Longest edge allowed in the Vietoris-Rips complex.
-MAX_EDGE_LENGTH = 1
+MAX_EDGE_LENGTH = 0.1
 
 # Highest simplex dimension to materialise.
 # 0 = vertices, 1 = edges, 2 = triangles.
@@ -75,6 +85,12 @@ TETRAHEDRON_COLOR = "#E6A817"
 
 def validate_controls():
     """Reject control values that cannot define a Vietoris-Rips homology run."""
+    if SERIES_COLUMN is not None and not isinstance(SERIES_COLUMN, str):
+        raise ValueError("SERIES_COLUMN must be a column name or None.")
+    if type(EMBEDDING_DIMENSION) is not int or EMBEDDING_DIMENSION < 1:
+        raise ValueError("EMBEDDING_DIMENSION must be a positive integer.")
+    if type(EMBEDDING_DELAY) is not int or EMBEDDING_DELAY < 1:
+        raise ValueError("EMBEDDING_DELAY must be a positive integer.")
     if not isinstance(DISTANCE, str) or not DISTANCE:
         raise ValueError("DISTANCE must be a non-empty distance name.")
     if not np.isfinite(MAX_EDGE_LENGTH) or MAX_EDGE_LENGTH < 0:
@@ -146,6 +162,58 @@ def load_point_cloud(path):
     return cloud, columns
 
 
+def load_series(path, column_name):
+    """Return the chosen scalar column and its name. Row order is preserved."""
+    cloud, columns = load_point_cloud(path)
+    if column_name is None:
+        if len(columns) != 1:
+            names = ", ".join(columns)
+            raise ValueError(f"Set SERIES_COLUMN to one of: {names}.")
+        return cloud[:, 0], columns[0]
+    if column_name not in columns:
+        names = ", ".join(columns)
+        raise ValueError(f"Column {column_name!r} is not in {path.name}. Columns: {names}.")
+    return cloud[:, columns.index(column_name)], column_name
+
+
+def delay_embed(series, dimension, delay):
+    """Build delay vectors (x[t], x[t + delay], ..., x[t + (dimension - 1) * delay])."""
+    window = (dimension - 1) * delay
+    if len(series) <= window:
+        raise ValueError(
+            "The series is shorter than one embedding window. "
+            "Reduce EMBEDDING_DIMENSION or EMBEDDING_DELAY."
+        )
+    length = len(series) - window
+    return np.column_stack(
+        [series[lag * delay : lag * delay + length] for lag in range(dimension)]
+    )
+
+
+def embedded_column_names(series_name, dimension, delay):
+    """Label each coordinate by its lag in samples."""
+    names = []
+    for lag_index in range(dimension):
+        lag = lag_index * delay
+        if lag == 0:
+            names.append(f"{series_name}[t]")
+        else:
+            names.append(f"{series_name}[t+{lag}]")
+    return names
+
+
+def print_embedding(dataset_path, series_name, embedded, columns):
+    """Describe the delay embedding whose rows are the vertices."""
+    print("Time-delay embedding")
+    print(f"Dataset: {dataset_path}")
+    print(f"Series: {series_name}")
+    print(f"Embedding dimension: {EMBEDDING_DIMENSION}")
+    print(f"Delay: {EMBEDDING_DELAY} sample(s)")
+    print(f"Coordinates: {', '.join(columns)}")
+    print(f"Embedded points: {len(embedded)}")
+    print("Vertex i is the window starting at series index i.")
+
+
 def pairwise_distance_matrix(points, distance_name):
     """Return the square pairwise distance matrix selected by distance_name."""
     if distance_name == "euclidean":
@@ -176,7 +244,6 @@ def print_complex(simplex_tree, dataset_path, columns):
     print("Vietoris-Rips complex")
     print(f"Dataset: {dataset_path}")
     print(f"Columns: {', '.join(columns)}")
-    print("Each vertex index is the corresponding data row, starting at 0.")
     print(f"Distance: {DISTANCE}")
     print(f"Max edge length: {MAX_EDGE_LENGTH}")
     print(f"Max simplex dimension: {MAX_SIMPLEX_DIMENSION}")
@@ -189,7 +256,10 @@ def print_complex(simplex_tree, dataset_path, columns):
     for dimension in range(MAX_SIMPLEX_DIMENSION + 1):
         simplices = grouped.get(dimension, [])
         print(f"Dimension {dimension}: {len(simplices)} simplices")
-        # Every data row is a vertex born at scale 0, so list that set once.
+        # A dense dimension is already visible in the figure, so do not list every simplex.
+        if dimension != 0 and len(simplices) > 40:
+            continue
+        # Every embedded window is a vertex born at scale 0, so list that set once.
         if dimension == 0 and simplices:
             vertices = sorted(simplex[0] for simplex, _ in simplices)
             all_born_at_zero = all(filtration == 0 for _, filtration in simplices)
@@ -508,7 +578,7 @@ def render_complex(simplex_tree, points, columns, figure_dimension, figure_path,
     elif coordinate_mode == "padded":
         print("Coordinates: original axes, with constant 0 appended for the 3D view")
     else:
-        print("Coordinates: original point-cloud axes")
+        print("Coordinates: displayed without projection")
     if highest_dimension > 3:
         print(
             f"The complex contains simplices up to dimension {highest_dimension}. "
@@ -516,25 +586,45 @@ def render_complex(simplex_tree, points, columns, figure_dimension, figure_path,
         )
 
 
-def save_complex_figure(simplex_tree, points, columns, dataset_path):
+def save_complex_figure(simplex_tree, points, columns, dataset_path, title=None):
     """Resolve the figure controls and draw the complex."""
     figure_dimension = resolve_figure_dimension(points.shape[1])
     figure_path = resolve_figure_path(dataset_path)
-    render_complex(simplex_tree, points, columns, figure_dimension, figure_path)
+    render_complex(
+        simplex_tree,
+        points,
+        columns,
+        figure_dimension,
+        figure_path,
+        title=title,
+    )
 
 
 def main():
     validate_controls()
-    points, columns = load_point_cloud(DATASET_PATH)
-    distances = pairwise_distance_matrix(points, DISTANCE)
+    series, series_name = load_series(DATASET_PATH, SERIES_COLUMN)
+    embedded = delay_embed(series, EMBEDDING_DIMENSION, EMBEDDING_DELAY)
+    columns = embedded_column_names(series_name, EMBEDDING_DIMENSION, EMBEDDING_DELAY)
+    distances = pairwise_distance_matrix(embedded, DISTANCE)
     simplex_tree = build_rips_complex(
         distances,
         MAX_EDGE_LENGTH,
         MAX_SIMPLEX_DIMENSION,
     )
+    print_embedding(DATASET_PATH, series_name, embedded, columns)
+    print()
     print_complex(simplex_tree, DATASET_PATH, columns)
     print()
-    save_complex_figure(simplex_tree, points, columns, DATASET_PATH)
+    save_complex_figure(
+        simplex_tree,
+        embedded,
+        columns,
+        DATASET_PATH,
+        title=(
+            f"Delay embedding, EMBEDDING_DELAY={EMBEDDING_DELAY}, "
+            f"{DISTANCE}, threshold {MAX_EDGE_LENGTH:g}"
+        ),
+    )
     print()
     print_homology(simplex_tree, MAX_HOMOLOGY_DIMENSION, MAX_SIMPLEX_DIMENSION)
 

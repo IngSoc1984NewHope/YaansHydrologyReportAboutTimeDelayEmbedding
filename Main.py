@@ -48,7 +48,7 @@ EMBEDDING_DELAY = 2
 DISTANCE = "euclidean"
 
 # Longest edge allowed in the Vietoris-Rips complex.
-MAX_EDGE_LENGTH = 0.1
+MAX_EDGE_LENGTH = 0.15
 
 # Highest simplex dimension to materialise.
 # 0 = vertices, 1 = edges, 2 = triangles.

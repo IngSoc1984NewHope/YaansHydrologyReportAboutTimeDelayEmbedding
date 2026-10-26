@@ -28,7 +28,8 @@ from scipy.spatial.distance import cdist
 
 # Source table. Row order is the time order. A non-numeric first row is a header.
 #DATASET_PATH = Path(__file__).with_name("Exp1Sin.csv")
-DATASET_PATH = Path(__file__).with_name("MaeChaem_Q_H.csv")
+#DATASET_PATH = Path(__file__).with_name("MaeChaem_Q_H.csv")
+DATASET_PATH = Path(__file__).with_name("MagelaCreek_1k.csv")
 
 # Scalar series to embed. None selects the file when it has exactly one column.
 #SERIES_COLUMN = "sin(t)"
@@ -71,7 +72,7 @@ DISTANCE = "euclidean"
 THRESHOLD_METHOD = "connected_loop"
 
 # Fraction of the effective sample allowed to remain as separate components.
-COMPONENT_FRACTION = 0.1
+COMPONENT_FRACTION = 0.4
 
 # Upper bound of the one Vietoris-Rips filtration used to read persistence.
 # This is not the selected threshold. Increase it when no feasible threshold
